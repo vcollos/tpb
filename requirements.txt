@@ -1,0 +1,25 @@
+# Bibliotecas principais
+requests>=2.28.0
+beautifulsoup4>=4.11.0
+nltk>=3.7
+numpy>=1.22.0
+lxml>=4.9.0
+
+# Processamento de texto e embeddings
+scikit-learn>=1.0.0
+sentence-transformers>=2.2.0
+langchain>=0.0.267
+langchain-community>=0.0.10
+
+# Processamento de PDFs
+PyPDF2>=2.10.0
+pdfminer.six>=20220524
+
+# Armazenamento vetorial
+faiss-cpu>=1.7.4
+chromadb>=0.4.13
+
+# Utilitários
+tqdm>=4.64.0
+python-dotenv>=0.20.0
+argparse>=1.4.0
