@@ -60,6 +60,45 @@ vector-tpb/
    pip install -r requirements.txt
    ```
 
+## Configuração
+
+O projeto pode ser configurado usando variáveis de ambiente, que podem ser definidas em um arquivo `.env`.
+Para começar, copie o arquivo de exemplo:
+
+```bash
+cp .env.example .env
+```
+
+Depois, edite o arquivo `.env` para preencher os valores desejados.
+
+### Chave de API PubMed (NCBI E-utils)
+
+-   **Variável**: `PUBMED_API_KEY`
+-   **Argumento CLI**: `--pubmed-api-key`
+
+Utilizar uma chave de API do NCBI E-utils para o PubMed pode fornecer limites de requisição mais altos, resultando em uma extração de dados mais rápida desta fonte.
+
+**Como definir:**
+
+1.  **Arquivo `.env` (recomendado para desenvolvimento):**
+    Adicione a seguinte linha ao seu arquivo `.env`:
+    ```
+    PUBMED_API_KEY="sua_chave_api_aqui"
+    ```
+2.  **Variável de ambiente direta:**
+    Você pode definir a variável de ambiente diretamente no seu terminal:
+    ```bash
+    export PUBMED_API_KEY="sua_chave_api_aqui" # Linux/Mac
+    set PUBMED_API_KEY="sua_chave_api_aqui"    # Windows
+    ```
+3.  **Argumento de Linha de Comando:**
+    Você pode fornecer a chave diretamente ao executar `main.py`:
+    ```bash
+    python main.py --pubmed-api-key "sua_chave_api_aqui"
+    ```
+
+**Precedência:** O argumento de linha de comando (`--pubmed-api-key`) terá precedência sobre a variável de ambiente (`PUBMED_API_KEY` no arquivo `.env` ou exportada) se ambos forem fornecidos.
+
 ## Uso
 
 ### Execução Completa
@@ -85,6 +124,7 @@ Argumentos disponíveis:
 - `--query-pt`: Define a consulta em português (padrão: "transtorno de personalidade borderline")
 - `--query-en`: Define a consulta em inglês (padrão: "borderline personality disorder")
 - `--max-articles`: Define o número máximo de artigos por fonte (padrão: 10)
+- `--pubmed-api-key TEXT`: Chave de API para NCBI E-utils (PubMed). Também configurável via variável de ambiente `PUBMED_API_KEY`.
 
 ### Exemplos de Uso
 

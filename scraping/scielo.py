@@ -10,6 +10,7 @@ import requests
 from bs4 import BeautifulSoup
 import time
 import random
+from urllib.parse import urljoin
 
 logger = logging.getLogger(__name__)
 
@@ -60,8 +61,10 @@ class SciELOScraper:
         
         article_urls = []
         try:
+            # Adicionar delay para evitar sobrecarga do servidor (já existe implicitamente no __init__, mas pode ser bom ter aqui também)
+            time.sleep(self.delay * (0.5 + random.random()))
             response = self.session.get(self.SEARCH_URL, params=params)
-            response.raise_for_status()
+            response.raise_for_status() # Raise HTTPError for bad responses (4XX or 5XX)
             
             soup = BeautifulSoup(response.text, 'html.parser')
             results = soup.select('.record')
@@ -72,8 +75,10 @@ class SciELOScraper:
                     article_urls.append(link_elem['href'])
             
             logger.info(f"Encontrados {len(article_urls)} artigos")
-            
-        except Exception as e:
+
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Network error during search_articles: {e}")
+        except Exception as e: # Keep a general exception for other unexpected errors like parsing
             logger.error(f"Erro ao buscar artigos: {str(e)}")
         
         return article_urls
@@ -104,7 +109,7 @@ class SciELOScraper:
             time.sleep(self.delay * (0.5 + random.random()))
             
             response = self.session.get(url)
-            response.raise_for_status()
+            response.raise_for_status() # Raise HTTPError for bad responses (4XX or 5XX)
             
             soup = BeautifulSoup(response.text, 'html.parser')
             
@@ -129,11 +134,12 @@ class SciELOScraper:
             # Extrair URL do PDF
             pdf_link = soup.select_one('a[href*=".pdf"]')
             if pdf_link and 'href' in pdf_link.attrs:
-                article_data['pdf_url'] = pdf_link['href']
-                if not article_data['pdf_url'].startswith('http'):
-                    article_data['pdf_url'] = self.BASE_URL + article_data['pdf_url']
-            
-        except Exception as e:
+                pdf_href = pdf_link['href']
+                article_data['pdf_url'] = urljoin(self.BASE_URL, pdf_href)
+
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Network error during extract_article for URL {url}: {e}")
+        except Exception as e: # General exception for other issues like parsing
             logger.error(f"Erro ao extrair artigo {url}: {str(e)}")
         
         return article_data
@@ -154,7 +160,7 @@ class SciELOScraper:
             time.sleep(self.delay * (0.5 + random.random()))
             
             response = self.session.get(pdf_url, stream=True)
-            response.raise_for_status()
+            response.raise_for_status() # Raise HTTPError for bad responses (4XX or 5XX)
             
             with open(output_path, 'wb') as f:
                 for chunk in response.iter_content(chunk_size=8192):
@@ -162,8 +168,14 @@ class SciELOScraper:
             
             logger.info(f"PDF baixado com sucesso: {output_path}")
             return True
-            
-        except Exception as e:
+
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Network error during download_pdf for URL {pdf_url}: {e}")
+            return False
+        except IOError as e: # Specific error for file writing issues
+            logger.error(f"File I/O error while saving PDF from {pdf_url} to {output_path}: {e}")
+            return False
+        except Exception as e: # General exception for other issues
             logger.error(f"Erro ao baixar PDF {pdf_url}: {str(e)}")
             return False
 
@@ -180,6 +192,7 @@ def scrape_articles(query="transtorno de personalidade borderline", max_articles
         Lista de caminhos para os arquivos extraídos
     """
     scraper = SciELOScraper(max_articles=max_articles)
+    lang_code = 'pt' # Default language for SciELO
     
     # Criar diretório de saída se não existir
     os.makedirs(output_dir, exist_ok=True)
@@ -187,7 +200,7 @@ def scrape_articles(query="transtorno de personalidade borderline", max_articles
     # Buscar artigos
     article_urls = scraper.search_articles(query)
     
-    extracted_files = []
+    extracted_files = [] # This will now be a list of dictionaries
     for i, url in enumerate(article_urls):
         # Extrair dados do artigo
         article_data = scraper.extract_article(url)
@@ -214,15 +227,15 @@ def scrape_articles(query="transtorno de personalidade borderline", max_articles
             f.write(article_data['abstract'] + "\n\n")
             f.write(article_data['full_text'])
         
-        extracted_files.append(text_path)
+        extracted_files.append({'path': text_path, 'lang': lang_code, 'type': 'txt'})
         
         # Baixar PDF se disponível
         if article_data['pdf_url']:
             pdf_path = os.path.join(output_dir, f"{i+1:03d}_{safe_title}.pdf")
-            scraper.download_pdf(article_data['pdf_url'], pdf_path)
-            extracted_files.append(pdf_path)
+            if scraper.download_pdf(article_data['pdf_url'], pdf_path):
+                extracted_files.append({'path': pdf_path, 'lang': lang_code, 'type': 'pdf'})
     
-    logger.info(f"Extração concluída. {len(extracted_files)} arquivos salvos em {output_dir}")
+    logger.info(f"Extração concluída. {len(extracted_files)} itens (arquivos de texto/PDF) extraídos para {output_dir}")
     return extracted_files
 
 if __name__ == "__main__":

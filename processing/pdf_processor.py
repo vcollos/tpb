@@ -178,18 +178,28 @@ class PDFProcessor:
             
             # Criar nome base para os arquivos de saída
             base_name = os.path.splitext(os.path.basename(pdf_path))[0]
-            
-            # Salvar texto extraído
             text_path = os.path.join(output_dir, f"{base_name}.txt")
-            with open(text_path, 'w', encoding='utf-8') as f:
-                f.write(text)
-            
-            # Salvar metadados
             metadata_path = os.path.join(output_dir, f"{base_name}.json")
+
+            # Salvar texto extraído somente se não estiver vazio
+            if text.strip():
+                with open(text_path, 'w', encoding='utf-8') as f:
+                    f.write(text)
+                logger.info(f"Texto extraído salvo em: {text_path}")
+            else:
+                logger.error(f"No text extracted from PDF: {pdf_path}. Corresponding .txt file will not be saved.")
+                # text_path is not created, but metadata will still be saved.
+            
+            # Salvar metadados independentemente do sucesso da extração de texto
             with open(metadata_path, 'w', encoding='utf-8') as f:
                 json.dump(metadata, f, ensure_ascii=False, indent=2)
+            logger.info(f"Metadados salvos em: {metadata_path}")
             
-            logger.info(f"Resultados salvos em: {text_path} e {metadata_path}")
+            # Ajustar mensagem de log geral
+            if text.strip():
+                logger.info(f"Resultados salvos em: {text_path} e {metadata_path}")
+            else:
+                logger.info(f"Metadados salvos em: {metadata_path} (texto não extraído/salvo).")
         
         return result
 

@@ -36,23 +36,41 @@ except ImportError:
 class TextCleaner:
     """Classe para limpeza e normalização de textos."""
     
-    def __init__(self, language='portuguese', remove_stopwords=False):
+    def __init__(self, language='en'):
         """
         Inicializa o limpador de texto.
         
         Args:
-            language: Idioma para processamento (português ou inglês)
-            remove_stopwords: Se deve remover stopwords
+            language: Idioma para processamento ('en', 'pt', 'es').
         """
         self.language = language
-        self.remove_stopwords = remove_stopwords
+        self.remove_stopwords = True # Defaulting to True as parameter is removed
         
-        # Carregar stopwords se NLTK estiver disponível e remoção de stopwords estiver ativada
+        self.nltk_lang = 'english' # default
+        if language == 'pt':
+            self.nltk_lang = 'portuguese'
+        elif language == 'es':
+            self.nltk_lang = 'spanish'
+        elif language == 'en':
+            self.nltk_lang = 'english'
+        else:
+            logger.warning(f"Unsupported language code '{language}' for TextCleaner. Defaulting to English for NLTK.")
+            # self.nltk_lang remains 'english' as set by default
+        
+        # Carregar stopwords se NLTK estiver disponível (remove_stopwords is now True by default)
         self.stopwords = set()
-        if HAVE_NLTK and remove_stopwords:
-            nltk_lang = 'portuguese' if language == 'portuguese' else 'english'
-            self.stopwords = set(stopwords.words(nltk_lang))
-    
+        if HAVE_NLTK and self.remove_stopwords: # self.remove_stopwords is True
+            try:
+                self.stopwords = set(stopwords.words(self.nltk_lang))
+            except LookupError:
+                logger.error(f"Stopwords for language '{self.nltk_lang}' not found by NLTK. No stopwords will be removed.")
+                # Attempt to download if it was a download issue, though initial setup should handle this.
+                # nltk.download('stopwords', quiet=True) # Re-download might be too aggressive here.
+                # self.stopwords will remain empty if not found
+            except Exception as e: # Catch any other potential errors during stopword loading
+                logger.error(f"Error loading stopwords for '{self.nltk_lang}': {e}. No stopwords will be removed.")
+                self.stopwords = set()
+
     def clean_text(self, text: str) -> str:
         """
         Limpa e normaliza um texto.
@@ -85,8 +103,8 @@ class TextCleaner:
         text = re.sub(r'\s+', ' ', text).strip()
         
         # Remover stopwords se necessário
-        if self.remove_stopwords and HAVE_NLTK:
-            words = word_tokenize(text, language=self.language)
+        if self.remove_stopwords and HAVE_NLTK and self.stopwords: # Ensure stopwords are loaded
+            words = word_tokenize(text, language=self.nltk_lang)
             words = [word for word in words if word not in self.stopwords]
             text = ' '.join(words)
         
@@ -133,7 +151,7 @@ class TextCleaner:
             return []
         
         if HAVE_NLTK:
-            return sent_tokenize(text, language=self.language)
+            return sent_tokenize(text, language=self.nltk_lang)
         else:
             # Fallback simples se NLTK não estiver disponível
             sentences = re.split(r'(?<=[.!?])\s+', text)
@@ -175,7 +193,7 @@ class TextCleaner:
         
         return result
 
-def process_documents(input_dir: str, output_dir: str, file_pattern: str = "*.txt") -> List[str]:
+def process_documents(input_dir: str, output_dir: str, file_pattern: str = "*.txt", language: str = 'en') -> List[str]:
     """
     Processa todos os documentos de texto em um diretório.
     
@@ -183,6 +201,7 @@ def process_documents(input_dir: str, output_dir: str, file_pattern: str = "*.tx
         input_dir: Diretório com os documentos de entrada
         output_dir: Diretório para salvar os documentos processados
         file_pattern: Padrão para selecionar arquivos
+        language: Idioma dos documentos ('en', 'pt', 'es')
         
     Returns:
         Lista de caminhos para os arquivos processados
@@ -191,7 +210,7 @@ def process_documents(input_dir: str, output_dir: str, file_pattern: str = "*.tx
     os.makedirs(output_dir, exist_ok=True)
     
     # Inicializar o limpador de texto
-    cleaner = TextCleaner()
+    cleaner = TextCleaner(language=language)
     
     # Encontrar todos os arquivos que correspondem ao padrão
     input_files = glob.glob(os.path.join(input_dir, file_pattern))
@@ -238,6 +257,68 @@ def process_documents(input_dir: str, output_dir: str, file_pattern: str = "*.tx
     
     logger.info(f"Processamento concluído. {len(processed_files)} arquivos processados.")
     return processed_files
+
+def process_single_file(input_file_path: str, output_dir: str, language: str = 'en') -> Optional[str]:
+    '''
+    Processes a single text document, cleans it, and saves the processed version.
+
+    Args:
+        input_file_path: Path to the input text file.
+        output_dir: Directory to save the processed text file and its metadata.
+        language: Language of the document ('en', 'pt', 'es').
+
+    Returns:
+        Path to the processed output text file, or None if processing failed.
+    '''
+    logger.info(f"Processing single file: {input_file_path} for language: {language}")
+    try:
+        # Create TextCleaner instance for the given language
+        cleaner = TextCleaner(language=language)
+
+        # Determine output file path
+        filename = os.path.basename(input_file_path)
+        output_file = os.path.join(output_dir, filename)
+        os.makedirs(output_dir, exist_ok=True) # Ensure output_dir exists
+
+        # Check for corresponding metadata .json file for the input
+        # (e.g., if input_file_path is dir/foo.txt, metadata is dir/foo.json)
+        input_metadata_file = os.path.splitext(input_file_path)[0] + ".json"
+        metadata = {}
+        if os.path.exists(input_metadata_file):
+            with open(input_metadata_file, 'r', encoding='utf-8') as f:
+                metadata = json.load(f)
+        else:
+            # If no specific JSON metadata, create basic metadata from filename
+            metadata = {'source_filename': filename}
+
+
+        # Read text from the input file
+        with open(input_file_path, 'r', encoding='utf-8') as f:
+            text_content = f.read()
+
+        # Process the document using TextCleaner instance
+        # The process_document method in TextCleaner expects text and optional metadata
+        processed_doc_data = cleaner.process_document(text=text_content, metadata=metadata)
+
+        # Save the cleaned text
+        with open(output_file, 'w', encoding='utf-8') as f:
+            f.write(processed_doc_data["text"])
+
+        # Save the (potentially updated) metadata and stats
+        output_metadata_json_path = os.path.splitext(output_file)[0] + ".json"
+        with open(output_metadata_json_path, 'w', encoding='utf-8') as f:
+            json.dump({
+                "original_metadata": processed_doc_data.get("metadata", {}), # metadata passed to process_document
+                "processing_stats": processed_doc_data.get("stats", {}),
+                "language_processed": language
+            }, f, ensure_ascii=False, indent=2)
+        
+        logger.info(f"Successfully processed and saved: {input_file_path} -> {output_file} (metadata: {output_metadata_json_path})")
+        return output_file
+
+    except Exception as e:
+        logger.error(f"Error processing single file {input_file_path}: {e}", exc_info=True)
+        return None
 
 if __name__ == "__main__":
     # Teste da função de processamento

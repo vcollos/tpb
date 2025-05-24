@@ -82,10 +82,10 @@ class VectorStore:
                 logger.info(f"Carregando modelo de embedding: {self.embedding_model_name}")
                 self.embedding_model = SentenceTransformer(self.embedding_model_name)
                 self.dimension = self.embedding_model.get_sentence_embedding_dimension()
-                logger.info(f"Modelo carregado com dimensão de embedding: {self.dimension}")
+                logger.info(f"Modelo de embedding '{self.embedding_model_name}' carregado com dimensão: {self.dimension}")
             except Exception as e:
-                logger.error(f"Erro ao carregar modelo de embedding: {str(e)}")
-                self.embedding_model = None
+                logger.exception(f"Erro fatal ao carregar modelo de embedding '{self.embedding_model_name}'. As embeddings não funcionarão corretamente.")
+                self.embedding_model = None # Ensure it's None if loading failed
     
     def _get_embedding(self, text: str) -> List[float]:
         """
@@ -105,10 +105,14 @@ class VectorStore:
             try:
                 return self.embedding_model.encode(text).tolist()
             except Exception as e:
-                logger.error(f"Erro ao gerar embedding: {str(e)}")
+                logger.error(f"Erro ao gerar embedding com o modelo '{self.embedding_model_name}': {e}", exc_info=True)
+                logger.warning("Recorrendo a embeddings aleatórias devido a erro no modelo principal.")
+        else:
+            logger.warning(f"Modelo de embedding '{self.embedding_model_name}' não está disponível. Recorrendo a embeddings aleatórias.")
         
         # Fallback: vetor aleatório normalizado
         if HAVE_NUMPY:
+            logger.debug("Gerando embedding aleatória normalizada com NumPy.")
             random_vector = np.random.randn(self.dimension)
             normalized = random_vector / np.linalg.norm(random_vector)
             return normalized.tolist()
@@ -157,10 +161,10 @@ class VectorStore:
             embeddings_array = np.array(self.embeddings).astype('float32')
             self.index = faiss.IndexFlatL2(self.dimension)
             self.index.add(embeddings_array)
-            logger.info(f"Índice construído com {len(self.embeddings)} documentos.")
+            logger.info(f"Índice FAISS construído com {self.index.ntotal} vetores.")
         except Exception as e:
-            logger.error(f"Erro ao construir índice FAISS: {str(e)}")
-            self.index = None
+            logger.exception("Erro crítico ao construir índice FAISS.")
+            self.index = None # Ensure index is None on failure
     
     def search(self, query: str, top_k: int = 5) -> List[Tuple[Document, float]]:
         """
@@ -199,10 +203,19 @@ class VectorStore:
                     
                     return results
                 except Exception as e:
-                    logger.error(f"Erro na busca FAISS: {str(e)}")
+                    logger.exception("Erro durante a busca com FAISS.")
+                    logger.warning("Recorrendo à busca por similaridade de cosseno devido a erro no FAISS.")
         
         # Fallback: busca por similaridade de cosseno
+        if not (HAVE_FAISS and self.index): # Log fallback only if FAISS was supposed to be used or failed
+            if HAVE_FAISS and not self.index:
+                 logger.warning("FAISS disponível, mas índice não construído. Usando similaridade de cosseno.")
+            elif not HAVE_FAISS:
+                 logger.warning("FAISS não disponível. Usando similaridade de cosseno.")
+
+
         if HAVE_NUMPY:
+            logger.debug("Realizando busca por similaridade de cosseno com NumPy.")
             try:
                 query_array = np.array(query_embedding)
                 similarities = []
@@ -224,9 +237,12 @@ class VectorStore:
                 
                 return results
             except Exception as e:
-                logger.error(f"Erro na busca por similaridade de cosseno: {str(e)}")
+                logger.exception("Erro durante a busca por similaridade de cosseno com NumPy.")
+        else:
+            logger.warning("NumPy não disponível. Recorrendo à busca por similaridade de cosseno com Python puro (pode ser lento).")
         
         # Fallback sem NumPy
+        logger.debug("Realizando busca por similaridade de cosseno com Python puro.")
         import math
         
         def cosine_similarity(vec1, vec2):
@@ -280,11 +296,11 @@ class VectorStore:
             with open(path, 'wb') as f:
                 pickle.dump(data, f)
             
-            logger.info(f"Índice salvo em: {path}")
+            logger.info(f"Índice com {len(self.documents)} documentos salvo em: {path}")
             return True
             
         except Exception as e:
-            logger.error(f"Erro ao salvar índice: {str(e)}")
+            logger.exception(f"Erro fatal ao salvar índice em '{path}'.")
             return False
     
     @classmethod
@@ -315,21 +331,20 @@ class VectorStore:
             # Carregar embeddings
             store.embeddings = data["embeddings"]
             
-            logger.info(f"Índice carregado de: {path} com {len(store.documents)} documentos")
+            logger.info(f"Índice carregado de '{path}' com {len(store.documents)} documentos. Modelo de embedding: {store.embedding_model_name}")
             return store
             
         except Exception as e:
-            logger.error(f"Erro ao carregar índice: {str(e)}")
-            return cls()
+            logger.exception(f"Erro fatal ao carregar índice de '{path}'. Retornando VectorStore vazio.")
+            return cls() # Return a new, empty store
 
-def create_index(input_dir: str, output_path: str, file_pattern: str = "*.txt") -> bool:
+def create_index(file_paths: List[str], output_path: str) -> bool:
     """
-    Cria um índice vetorial a partir de documentos em um diretório.
+    Cria um índice vetorial a partir de uma lista de caminhos de arquivos.
     
     Args:
-        input_dir: Diretório com os documentos processados
-        output_path: Caminho para salvar o índice
-        file_pattern: Padrão para selecionar arquivos
+        file_paths: Lista de caminhos para os documentos processados.
+        output_path: Caminho para salvar o índice.
         
     Returns:
         Boolean indicando sucesso
@@ -337,43 +352,67 @@ def create_index(input_dir: str, output_path: str, file_pattern: str = "*.txt") 
     # Inicializar o armazenamento vetorial
     store = VectorStore()
     
-    # Encontrar todos os arquivos que correspondem ao padrão
-    input_files = glob.glob(os.path.join(input_dir, file_pattern))
-    logger.info(f"Encontrados {len(input_files)} arquivos para indexação")
-    
-    # Processar cada arquivo
-    for input_file in input_files:
+    if not file_paths:
+        logger.warning("Nenhuma lista de arquivos fornecida para create_index. O índice estará vazio.")
+        # Still save an empty index for consistency, or handle as an error?
+        # For now, let it save an empty index.
+    else:
+        logger.info(f"Iniciando criação de índice para {len(file_paths)} arquivos. Saída: {output_path}")
+
+    successful_indexed_count = 0
+    failed_files = []
+
+    for input_file in file_paths:
         try:
-            # Extrair ID do documento (nome do arquivo)
+            logger.debug(f"Processando arquivo para indexação: {input_file}")
             doc_id = os.path.basename(input_file)
             
-            # Ler o texto do arquivo
             with open(input_file, 'r', encoding='utf-8') as f:
                 text = f.read()
             
-            # Verificar se existe arquivo de metadados correspondente
+            if not text.strip():
+                logger.warning(f"Arquivo '{input_file}' está vazio ou contém apenas espaços em branco. Pulando indexação.")
+                failed_files.append(input_file)
+                continue
+
             metadata_file = os.path.splitext(input_file)[0] + ".json"
             metadata = {}
             if os.path.exists(metadata_file):
-                with open(metadata_file, 'r', encoding='utf-8') as f:
-                    metadata = json.load(f)
+                try:
+                    with open(metadata_file, 'r', encoding='utf-8') as f:
+                        metadata = json.load(f)
+                    logger.debug(f"Metadados carregados para {doc_id} de {metadata_file}")
+                except json.JSONDecodeError:
+                    logger.error(f"Erro ao decodificar JSON de metadados: {metadata_file}. Usando metadados vazios.", exc_info=True)
+                except Exception as e:
+                    logger.error(f"Erro ao carregar metadados de {metadata_file}: {e}. Usando metadados vazios.", exc_info=True)
+            else:
+                logger.debug(f"Nenhum arquivo de metadados encontrado para {doc_id} em {metadata_file}. Usando metadados vazios.")
             
-            # Criar documento e adicionar ao índice
             document = Document(doc_id, text, metadata)
             store.add_document(document)
-            
-            logger.info(f"Documento indexado: {doc_id}")
+            successful_indexed_count += 1
+            logger.info(f"Documento '{doc_id}' adicionado ao índice para construção.")
             
         except Exception as e:
-            logger.error(f"Erro ao indexar {input_file}: {str(e)}")
+            logger.exception(f"Erro crítico ao processar e indexar o arquivo '{input_file}'.")
+            failed_files.append(input_file)
     
+    logger.info(f"Total de documentos adicionados para indexação: {successful_indexed_count} de {len(file_paths)}.")
+    if failed_files:
+        logger.warning(f"{len(failed_files)} arquivos falharam ao serem processados para indexação: {failed_files}")
+
+    # Construir o índice FAISS após adicionar todos os documentos
+    if successful_indexed_count > 0:
+        store._build_index() # Explicitly build index after all docs are added
+
     # Salvar o índice
     success = store.save(output_path)
     
     if success:
-        logger.info(f"Índice criado com sucesso: {output_path}")
+        logger.info(f"Índice criado e salvo com sucesso em: {output_path} ({successful_indexed_count} documentos indexados).")
     else:
-        logger.error(f"Falha ao criar índice: {output_path}")
+        logger.error(f"Falha ao salvar o índice em: {output_path}")
     
     return success
 
@@ -391,16 +430,21 @@ def search_index(query: str, index_path: str, top_k: int = 5) -> List[Tuple[Docu
     """
     # Verificar se o índice existe
     if not os.path.exists(index_path):
-        logger.error(f"Índice não encontrado: {index_path}")
+        logger.error(f"Índice para busca não encontrado em: {index_path}")
         return []
     
     # Carregar o índice
+    logger.info(f"Carregando índice de {index_path} para busca.")
     store = VectorStore.load(index_path)
+    if not store.documents: # Check if store loading failed or index is empty
+        logger.warning(f"Índice em {index_path} está vazio ou não pôde ser carregado corretamente.")
+        return []
     
     # Realizar a busca
+    logger.info(f"Realizando busca no índice com query: '{query[:100]}...' (top_k={top_k})")
     results = store.search(query, top_k=top_k)
     
-    logger.info(f"Busca concluída. {len(results)} resultados encontrados.")
+    logger.info(f"Busca concluída. {len(results)} resultados encontrados para a query.")
     return results
 
 if __name__ == "__main__":
@@ -408,7 +452,13 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     
     # Criar índice de exemplo
-    create_index("data/processed", "data/index/tpb_index.pkl")
+    # Use glob to find sample files for testing
+    sample_files_for_testing = glob.glob(os.path.join("data", "processed", "*.txt"))
+    if sample_files_for_testing:
+        # Optionally, limit the number of files for a quick test, e.g., sample_files_for_testing[:3]
+        create_index(sample_files_for_testing, "data/index/tpb_index.pkl")
+    else:
+        logger.warning("No sample files found in data/processed for testing create_index in __main__.")
     
     # Testar busca
     results = search_index("tratamentos para transtorno borderline", "data/index/tpb_index.pkl")

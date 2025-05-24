@@ -191,6 +191,7 @@ def scrape_articles(query="borderline personality disorder", max_articles=10, ou
         Lista de caminhos para os arquivos extraídos
     """
     scraper = MedRxivScraper(max_articles=max_articles)
+    lang_code = 'en' # Default language for medRxiv
     
     # Criar diretório de saída se não existir
     os.makedirs(output_dir, exist_ok=True)
@@ -198,7 +199,7 @@ def scrape_articles(query="borderline personality disorder", max_articles=10, ou
     # Buscar artigos
     article_urls = scraper.search_articles(query)
     
-    extracted_files = []
+    extracted_files = [] # This will now be a list of dictionaries
     for i, url in enumerate(article_urls):
         # Extrair dados do artigo
         article_data = scraper.extract_article(url)
@@ -227,15 +228,15 @@ def scrape_articles(query="borderline personality disorder", max_articles=10, ou
                 f.write("DOI: " + article_data['doi'] + "\n\n")
             f.write(article_data['abstract'])
         
-        extracted_files.append(text_path)
+        extracted_files.append({'path': text_path, 'lang': lang_code, 'type': 'txt'})
         
         # Baixar PDF se disponível
         if article_data['pdf_url']:
             pdf_path = os.path.join(output_dir, f"medrxiv_{i+1:03d}_{safe_title}.pdf")
-            scraper.download_pdf(article_data['pdf_url'], pdf_path)
-            extracted_files.append(pdf_path)
+            if scraper.download_pdf(article_data['pdf_url'], pdf_path):
+                extracted_files.append({'path': pdf_path, 'lang': lang_code, 'type': 'pdf'})
     
-    logger.info(f"Extração concluída. {len(extracted_files)} arquivos salvos em {output_dir}")
+    logger.info(f"Extração concluída. {len(extracted_files)} itens (arquivos de texto/PDF) extraídos para {output_dir}")
     return extracted_files
 
 if __name__ == "__main__":

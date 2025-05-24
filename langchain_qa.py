@@ -56,28 +56,35 @@ class LangChainQA:
         
         # Verificar se o índice existe
         if not os.path.exists(index_path):
-            logger.error(f"Índice não encontrado: {index_path}")
+            logger.error(f"Arquivo de índice não encontrado em: {index_path}", exc_info=True) # Added exc_info
             return
         
         # Verificar se as bibliotecas necessárias estão disponíveis
         if not HAVE_LANGCHAIN:
-            logger.error("LangChain é necessário para este script.")
-            return
+            logger.error("Biblioteca LangChain não encontrada. Esta classe não funcionará.")
+            return # Cannot proceed without LangChain
         
         # Inicializar o sistema
+        logger.info("Iniciando inicialização do sistema LangChainQA...")
         self._initialize()
     
     def _initialize(self):
         """Inicializa o sistema de QA com LangChain."""
         try:
             # Carregar o índice
-            logger.info(f"Carregando índice de {self.index_path}")
+            logger.info(f"Carregando dados do índice de: {self.index_path}")
             with open(self.index_path, 'rb') as f:
                 index_data = pickle.load(f)
+            logger.info(f"Dados do índice carregados. {len(index_data.get('documents', []))} documentos encontrados no pickle.")
             
             # Extrair documentos e embeddings
             documents = []
-            for doc_dict, embedding in zip(index_data["documents"], index_data["embeddings"]):
+            # Assuming index_data["embeddings"] are not directly used here if FAISS is built from documents + new embeddings
+            if not index_data.get("documents"):
+                logger.error(f"Nenhum documento encontrado no arquivo de índice: {self.index_path}")
+                return
+
+            for doc_dict in index_data["documents"]: # Embeddings from file are not used for LangChain FAISS
                 langchain_doc = Document(
                     page_content=doc_dict["text"],
                     metadata=doc_dict.get("metadata", {})
@@ -85,52 +92,56 @@ class LangChainQA:
                 documents.append(langchain_doc)
             
             # Inicializar embeddings
-            embeddings = HuggingFaceEmbeddings(
-                model_name="sentence-transformers/all-MiniLM-L6-v2"
-            )
+            embedding_model_name = "sentence-transformers/all-MiniLM-L6-v2"
+            logger.info(f"Inicializando embeddings com HuggingFaceEmbeddings, modelo: {embedding_model_name}")
+            embeddings = HuggingFaceEmbeddings(model_name=embedding_model_name)
             
             # Criar vetor store
+            logger.info(f"Criando FAISS vector store a partir de {len(documents)} documentos.")
             self.vector_store = FAISS.from_documents(documents, embeddings)
+            logger.info("FAISS vector store criado com sucesso.")
             
             # Configurar o modelo de linguagem
+            llm_choice = "OpenAI" if self.use_openai else "Local LLM (HuggingFace)"
+            logger.info(f"Configurando modelo de linguagem: {llm_choice}")
+
             if self.use_openai:
-                # Verificar se a chave API está disponível
                 openai_api_key = os.getenv("OPENAI_API_KEY")
                 if not openai_api_key:
-                    logger.warning("Chave API OpenAI não encontrada. Defina a variável de ambiente OPENAI_API_KEY.")
-                    logger.info("Usando fallback para modelo local.")
-                    self.use_openai = False
+                    logger.warning("Chave API OpenAI (OPENAI_API_KEY) não encontrada no ambiente.")
+                    logger.info("Recorrendo a modelo local devido à ausência da chave OpenAI.")
+                    self.use_openai = False # Force fallback
+                else:
+                    logger.info("Usando OpenAI LLM.")
+                    llm = OpenAI(temperature=0) # Add model_name if specific needed, e.g., "text-davinci-003"
             
-            if self.use_openai:
-                # Usar OpenAI
-                llm = OpenAI(temperature=0)
-            else:
-                # Usar modelo local via LangChain
+            if not self.use_openai: # This 'if' will also catch the fallback from the block above
+                logger.info("Tentando carregar modelo LLM local via HuggingFacePipeline.")
                 try:
                     from langchain.llms import HuggingFacePipeline
-                    import torch
+                    # import torch # Not explicitly used here, but good for transformers
                     from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
                     
-                    # Carregar modelo local (exemplo com um modelo pequeno)
-                    model_id = "google/flan-t5-small"  # Pode ser substituído por outro modelo
+                    model_id = "google/flan-t5-small" 
+                    logger.info(f"Carregando modelo local: {model_id}")
                     tokenizer = AutoTokenizer.from_pretrained(model_id)
-                    model = AutoModelForCausalLM.from_pretrained(model_id)
+                    model = AutoModelForCausalLM.from_pretrained(model_id) # Or AutoModelForSeq2SeqLM for T5
                     
                     pipe = pipeline(
-                        "text-generation",
+                        "text2text-generation" if "t5" in model_id else "text-generation", # Adjust task for T5 models
                         model=model,
                         tokenizer=tokenizer,
-                        max_length=512
+                        max_length=512 # Adjust as needed
                     )
-                    
                     llm = HuggingFacePipeline(pipeline=pipe)
+                    logger.info(f"Modelo local {model_id} carregado com sucesso.")
                     
                 except Exception as e:
-                    logger.error(f"Erro ao carregar modelo local: {str(e)}")
-                    logger.error("Não foi possível inicializar o sistema de QA.")
-                    return
+                    logger.exception(f"Erro crítico ao carregar modelo LLM local '{model_id}'. O sistema de QA não funcionará.")
+                    return # Cannot proceed without an LLM
             
             # Template de prompt
+            logger.info("Configurando template de prompt para RetrievalQA.")
             template = """
             Você é um assistente especializado em Transtorno de Personalidade Borderline (TPB).
             Use as informações a seguir para responder à pergunta.
@@ -152,17 +163,18 @@ class LangChainQA:
             # Criar chain de QA
             self.qa_chain = RetrievalQA.from_chain_type(
                 llm=llm,
-                chain_type="stuff",
-                retriever=self.vector_store.as_retriever(search_kwargs={"k": 5}),
-                chain_type_kwargs={"prompt": prompt}
+                chain_type="stuff", # Default, good for smaller contexts
+                retriever=self.vector_store.as_retriever(search_kwargs={"k": 5}), # Retrieve top 5 docs
+                chain_type_kwargs={"prompt": prompt},
+                return_source_documents=True # Optionally return source documents for inspection
             )
             
-            logger.info("Sistema de QA inicializado com sucesso")
+            logger.info("Sistema de QA (RetrievalQA chain) inicializado com sucesso.")
             
         except Exception as e:
-            logger.error(f"Erro ao inicializar o sistema de QA: {str(e)}")
+            logger.exception("Erro fatal durante a inicialização do sistema de QA.")
     
-    def answer_question(self, question):
+    def answer_question(self, question: str) -> str:
         """
         Responde a uma pergunta usando o banco de dados vetorial.
         
@@ -173,18 +185,28 @@ class LangChainQA:
             Resposta baseada nas fontes do banco de dados
         """
         if not self.qa_chain:
-            return "Sistema de QA não inicializado corretamente."
+            logger.error("Tentativa de responder pergunta, mas o sistema de QA não está inicializado.")
+            return "Erro: Sistema de QA não inicializado corretamente. Verifique os logs."
         
+        logger.info(f"Recebida pergunta para QA: '{question[:100]}...'")
         try:
             # Executar a chain de QA
             result = self.qa_chain({"query": question})
             
-            # Extrair e retornar a resposta
-            return result["result"]
+            answer = result.get("result", "Nenhuma resposta encontrada.")
+            source_docs = result.get("source_documents")
+            if source_docs:
+                logger.info(f"Resposta gerada a partir de {len(source_docs)} documentos fonte.")
+                for i, doc in enumerate(source_docs):
+                    logger.debug(f"Fonte {i+1}: ID='{doc.metadata.get('id', 'N/A')}', Trecho='{doc.page_content[:100]}...'")
+            else:
+                logger.info("Nenhum documento fonte retornado com a resposta.")
+
+            return answer
             
         except Exception as e:
-            logger.error(f"Erro ao responder pergunta: {str(e)}")
-            return f"Erro ao processar a pergunta: {str(e)}"
+            logger.exception(f"Erro ao processar pergunta no QA chain: '{question[:100]}...'")
+            return f"Erro ao processar a sua pergunta. Consulte os logs para mais detalhes."
 
 def main():
     """Função principal para demonstrar o sistema de QA."""

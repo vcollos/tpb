@@ -66,19 +66,22 @@ class PubMedScraper:
             params["api_key"] = self.api_key
         
         pmcids = []
+        pmcids = []
         try:
             # Adicionar delay para evitar sobrecarga do servidor
             time.sleep(self.delay * (0.5 + random.random()))
             
             response = self.session.get(self.SEARCH_URL, params=params)
-            response.raise_for_status()
+            response.raise_for_status()  # Raise HTTPError for bad responses (4XX or 5XX)
             
             data = response.json()
             pmcids = data.get("esearchresult", {}).get("idlist", [])
             
             logger.info(f"Encontrados {len(pmcids)} artigos no PubMed Central")
             
-        except Exception as e:
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Network error during search_articles: {e}")
+        except Exception as e: # Keep a general exception for other unexpected errors like JSON parsing
             logger.error(f"Erro ao buscar artigos no PubMed Central: {str(e)}")
         
         return pmcids[:self.max_articles]
@@ -123,7 +126,7 @@ class PubMedScraper:
             time.sleep(self.delay * (0.5 + random.random()))
             
             response = self.session.get(self.FETCH_URL, params=params)
-            response.raise_for_status()
+            response.raise_for_status() # Raise HTTPError for bad responses (4XX or 5XX)
             
             # Parsear XML
             root = ET.fromstring(response.content)
@@ -176,8 +179,12 @@ class PubMedScraper:
             doi_elem = root.find(".//article-id[@pub-id-type='doi']")
             if doi_elem is not None and doi_elem.text:
                 metadata["doi"] = doi_elem.text
-            
-        except Exception as e:
+        
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Network error during fetch_article_metadata for PMCID {pmcid}: {e}")
+        except ET.ParseError as e: # Specific error for XML parsing issues
+            logger.error(f"XML parsing error for PMCID {pmcid}: {e}")
+        except Exception as e: # General exception for other issues
             logger.error(f"Erro ao obter metadados do artigo PMCID {pmcid}: {str(e)}")
         
         return metadata
@@ -202,7 +209,7 @@ class PubMedScraper:
             time.sleep(self.delay * (0.5 + random.random()))
             
             response = self.session.get(full_text_url)
-            response.raise_for_status()
+            response.raise_for_status() # Raise HTTPError for bad responses (4XX or 5XX)
             
             soup = BeautifulSoup(response.text, 'html.parser')
             
@@ -224,8 +231,10 @@ class PubMedScraper:
                 main_content = soup.select_one("div.jig-ncbiinpagenav-content")
                 if main_content:
                     full_text = main_content.get_text(strip=True)
-            
-        except Exception as e:
+
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Network error during extract_full_text for PMCID {pmcid}: {e}")
+        except Exception as e: # General exception for other issues like parsing
             logger.error(f"Erro ao extrair texto completo do artigo PMCID {pmcid}: {str(e)}")
         
         return full_text
@@ -248,7 +257,7 @@ class PubMedScraper:
             time.sleep(self.delay * (0.5 + random.random()))
             
             response = self.session.get(pdf_url, stream=True)
-            response.raise_for_status()
+            response.raise_for_status() # Raise HTTPError for bad responses (4XX or 5XX)
             
             with open(output_path, 'wb') as f:
                 for chunk in response.iter_content(chunk_size=8192):
@@ -256,12 +265,18 @@ class PubMedScraper:
             
             logger.info(f"PDF baixado com sucesso: {output_path}")
             return True
-            
-        except Exception as e:
+        
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Network error during download_pdf for PMCID {pmcid}: {e}")
+            return False
+        except IOError as e: # Specific error for file writing issues
+            logger.error(f"File I/O error while saving PDF for PMCID {pmcid} to {output_path}: {e}")
+            return False
+        except Exception as e: # General exception for other issues
             logger.error(f"Erro ao baixar PDF do artigo PMCID {pmcid}: {str(e)}")
             return False
 
-def scrape_articles(query="borderline personality disorder", max_articles=10, output_dir="data/raw"):
+def scrape_articles(query="borderline personality disorder", max_articles=10, output_dir="data/raw", api_key=None):
     """
     Função principal para extrair artigos do PubMed Central.
     
@@ -269,11 +284,13 @@ def scrape_articles(query="borderline personality disorder", max_articles=10, ou
         query: Termos de busca
         max_articles: Número máximo de artigos
         output_dir: Diretório para salvar os dados
+        api_key: Chave de API do NCBI (opcional)
     
     Returns:
         Lista de caminhos para os arquivos extraídos
     """
-    scraper = PubMedScraper(max_articles=max_articles)
+    scraper = PubMedScraper(max_articles=max_articles, api_key=api_key)
+    lang_code = 'en' # Default language for PubMed
     
     # Criar diretório de saída se não existir
     os.makedirs(output_dir, exist_ok=True)
@@ -281,7 +298,7 @@ def scrape_articles(query="borderline personality disorder", max_articles=10, ou
     # Buscar artigos
     pmcids = scraper.search_articles(query)
     
-    extracted_files = []
+    extracted_files = [] # This will now be a list of dictionaries
     for i, pmcid in enumerate(pmcids):
         # Obter metadados do artigo
         metadata = scraper.fetch_article_metadata(pmcid)
@@ -313,13 +330,14 @@ def scrape_articles(query="borderline personality disorder", max_articles=10, ou
             f.write(metadata["abstract"] + "\n\n")
             f.write(full_text)
         
-        extracted_files.append(text_path)
+        extracted_files.append({'path': text_path, 'lang': lang_code, 'type': 'txt'})
         
         # Baixar PDF se disponível
         pdf_path = os.path.join(output_dir, f"pmc_{i+1:03d}_{safe_title}.pdf")
-        scraper.download_pdf(pmcid, pdf_path)
+        if scraper.download_pdf(pmcid, pdf_path):
+            extracted_files.append({'path': pdf_path, 'lang': lang_code, 'type': 'pdf'})
         
-    logger.info(f"Extração concluída. {len(extracted_files)} arquivos salvos em {output_dir}")
+    logger.info(f"Extração concluída. {len(extracted_files)} itens (arquivos de texto/PDF) extraídos para {output_dir}")
     return extracted_files
 
 if __name__ == "__main__":
